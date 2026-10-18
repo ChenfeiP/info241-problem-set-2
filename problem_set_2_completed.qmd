@@ -1,0 +1,342 @@
+---
+title: "Problem Set 2"
+jupyter: info241-ps2
+format:
+  html:
+    embed-resources: true
+  pdf:
+    pdf-engine: xelatex
+    code-block-font-size: "\\scriptsize"
+    include-in-header:
+      text: |
+        \AtBeginEnvironment{longtable}{\fontsize{6}{8}\selectfont\setlength{\tabcolsep}{2pt}}
+execute:
+  warning: false
+  message: false
+---
+
+```{python}
+import math
+from statistics import NormalDist
+
+import numpy as np
+import polars as pl
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+sns.set_theme(style="whitegrid", context="notebook")
+```
+
+# Replication
+
+There is conversation on campus about changes in funding to the Campus Student Learning Center [link](https://www.dailycal.org/news/campus/uc-berkeley-student-learning-center-faces-20-cut-in-peer-tutoring-budget/article_c7b88536-8256-4bd2-ab84-6673986dd06c.html). One positive aspect of the learning center is academic support; another may be a sense of belonging, social connection, and community identity. To examine these claims, this section reviews and reanalyzes the field experiment by [Dekker, Luberti, and Stam (2023)](https://doi.org/10.1016/j.learninstruc.2023.101805).
+
+## Experiment Design
+
+### 1. Core manipulation and rationale
+
+The authors randomly assigned 493 first-year students enrolled in 10 education programs to an offer of Supplemental Instruction (SI) during the third academic quarter or to a control condition. Students offered SI received an invitation to attend seven weekly, 100-minute peer-led sessions connected to a course. The sessions were led by trained students who had previously succeeded in the course and used collaborative activities to practice and discuss material already covered in class. Control students were told that they could not attend SI that quarter but could access it in the following quarter. The manipulation is therefore an **offer of access to SI**, not compulsory attendance: the causal effect identified by the assignment is the effect of being offered SI (an intention-to-treat effect).
+
+The authors expected SI to improve grades by giving students more time to practice course material through active, collaborative learning. They also expected that working with peers in a supportive setting could improve mental well-being and students' sense of belonging. These expectations make the academic and social outcomes plausible, but they are distinct pathways and need not respond equally to the same intervention.
+
+### 2. Outcome concepts, measures, and measurement critique
+
+**Academic performance** is the student's achievement in the course supported by SI. The authors measured it using the course exam grade from university records, on a 0–10 scale (5.5 is the passing threshold). Administrative grades avoid relying on students' memories or self-assessments. However, grades may not be perfectly comparable across the ten courses because exams and grading standards can differ; the original study accounted for the nested course structure in its grade analysis.
+
+**Mental well-being** refers to positive emotional and psychological functioning. It was measured before and after the quarter with the validated Dutch Short Warwick–Edinburgh Mental Well-being Scale (S-WEMWBS). The scale has seven items asking how often students experienced states such as feeling relaxed or connected to others over the previous two weeks, with five response levels. The reported internal consistency was acceptable but not high (Cronbach's alpha .77 at baseline and .75 at follow-up). A short validated scale is practical and broader than a single mood question, though self-reports capture students' perceptions at two survey moments rather than continuous well-being or clinical mental health.
+
+**Sense of belonging** is the perceived feeling of being included in the college community. The authors used a six-item scale developed by Meeuwisse et al. (2010), including items such as “I feel at home here”; a negatively worded item about avoiding class was reverse-coded. Responses used five frequency levels. The scale's reliability in this study was relatively low (alpha .68 at baseline and .65 at follow-up), so measurement error may make small effects difficult to detect. The scale also represents belonging with a brief set of self-reported items, rather than observing friendship networks, peer interaction, or belonging in different campus settings.
+
+Other potentially relevant concepts include course-specific understanding, study skills, academic self-efficacy, anxiety, social support, peer-network formation, retention, and students' use of SI sessions. These could help distinguish *how* SI affects grades and whether it creates the social connection proposed in the assignment's motivation. The study did record session attendance, but attendance is not itself a randomized outcome: students chose how often to attend after receiving the offer.
+
+Overall, the grade measure is a direct and consequential indicator of course performance, although course-to-course grading differences matter. The two survey scales are established measures and were collected at baseline and follow-up, but they are self-reported and imperfectly reliable—especially the belonging scale. Therefore, a null estimate for belonging should be read as “this study did not detect a difference with this measure and sample,” not proof that SI can never affect belonging.
+
+### 3. Design in `R, N, X, O, Y` notation
+
+Here, `R` denotes random assignment, `N` denotes the no-SI control condition during the study quarter, `X` is the SI offer, `O` is an observation/measurement, and `Y` is the outcome. The baseline survey was collected before random assignment; the follow-up survey was collected after the SI sessions and before exams.
+
+| Assignment | Condition during quarter 3 | Measurements and outcomes |
+|:--|:--|:--|
+| `R` | `X`: offer of seven weekly SI sessions | `O_0`: baseline well-being and belonging; `O_1`: exam grade, follow-up well-being, and follow-up belonging (`Y`) |
+| `R` | `N`: no SI access in quarter 3; access delayed until quarter 4 | `O_0`: baseline well-being and belonging; `O_1`: exam grade, follow-up well-being, and follow-up belonging (`Y`) |
+
+Random assignment after enrollment supports a causal comparison of the **offer** of SI and reduces confounding from students choosing for themselves whether to receive the offer. The pre-registered field experiment took place in real courses, grades came from administrative records, and the delayed-access control condition made the comparison more acceptable to students. The main limitations are that attendance was voluntary (so the treatment is an offer rather than actual attendance), surveys had substantial missingness, and students were clustered within classes and courses. The participant pool also consisted of volunteers from one Dutch university's education faculty, which limits generalization to other students and institutions. The relatively low follow-up reliability of the belonging scale makes a small effect especially hard to rule out.
+
+## Randomization Inference
+
+The data file contains 493 students: 255 assigned an SI offer and 238 assigned to control. The published study used a multilevel model for grades and adjusted analyses for demographic covariates. Here, as requested, I use the simpler difference in observed means and a two-sided randomization test without covariate adjustment. Under the sharp null, I repeatedly reassign the 255 treatment labels among all 493 students, preserving the original treatment count, and recalculate the difference in means.
+
+The outcomes are `grade` (course exam grade), `t1_wellbeing` (follow-up S-WEMWBS score), and `t1_belong` (follow-up belonging score). The permutation statistic uses students with an observed value for the outcome being tested. This complete-case analysis is easy to interpret, but follow-up survey and exam outcomes are missing for some students; the estimates therefore describe the observed cases and may be affected if missingness is related to treatment or outcomes.
+
+```{python}
+df = pl.read_parquet("./data/processed/supplimental_instruction.parquet")
+
+assert df.height == 493
+assert df["treatment"].sum() == 255
+
+def randomization_test(data, outcome, n_permutations=20_000, seed=241):
+    """Two-sided Fisher-style test preserving the original treated count."""
+    y_all = np.array(
+        [np.nan if value is None else float(value) for value in data[outcome].to_list()]
+    )
+    treatment_all = np.asarray(data["treatment"].to_list(), dtype=int)
+    observed = np.isfinite(y_all)
+    y = y_all[observed]
+    assigned = treatment_all[observed]
+
+    observed_difference = y[assigned == 1].mean() - y[assigned == 0].mean()
+    rng = np.random.default_rng(seed)
+    extreme = 0
+
+    for _ in range(n_permutations):
+        permuted_assignment = rng.permutation(treatment_all)[observed]
+        difference = (
+            y[permuted_assignment == 1].mean()
+            - y[permuted_assignment == 0].mean()
+        )
+        extreme += abs(difference) >= abs(observed_difference)
+
+    p_value = (extreme + 1) / (n_permutations + 1)
+    n_control = int(np.sum(assigned == 0))
+    n_treatment = int(np.sum(assigned == 1))
+    mean_control = float(y[assigned == 0].mean())
+    mean_treatment = float(y[assigned == 1].mean())
+
+    return {
+        "outcome": outcome,
+        "n_control": n_control,
+        "n_treatment": n_treatment,
+        "mean_control": mean_control,
+        "mean_treatment": mean_treatment,
+        "difference_treatment_minus_control": observed_difference,
+        "permutation_p_value": p_value,
+    }
+
+outcomes = ["grade", "t1_wellbeing", "t1_belong"]
+results = [randomization_test(df, outcome) for outcome in outcomes]
+result_table = pl.DataFrame(results).with_columns(
+    pl.col("mean_control", "mean_treatment", "difference_treatment_minus_control")
+      .round(3),
+    pl.col("permutation_p_value").round(4),
+)
+result_table
+```
+
+The estimated grade difference is 0.318 points in favor of the SI-offer group (6.369 versus 6.051; permutation p = .0945). The follow-up well-being difference is -0.048 points (3.453 versus 3.501; p = .4294), and the belonging difference is 0.036 points (3.901 versus 3.865; p = .5889). None of the three unadjusted differences is statistically significant at the .05 level in this reanalysis. The grade estimate is in the direction reported by the paper, but the unadjusted complete-case permutation test is less conclusive than the published adjusted, multilevel analysis. The well-being and belonging estimates are close to zero. These results are consistent with the paper's broad pattern, but they do not establish that the true effects on well-being or belonging are exactly zero.
+
+```{python}
+missingness = []
+for outcome in outcomes:
+    for treatment_value, group_name in [(0, "Control"), (1, "SI offer")]:
+        group = df.filter(pl.col("treatment") == treatment_value)
+        missingness.append({
+            "outcome": outcome,
+            "group": group_name,
+            "n_total": group.height,
+            "n_missing": group[outcome].null_count(),
+            "missing_percent": 100 * group[outcome].null_count() / group.height,
+        })
+
+pl.DataFrame(missingness).with_columns(
+    pl.col("missing_percent").round(1)
+)
+```
+
+## Power Analysis
+
+The outcome is whether a person attends the pizza event, a binary variable. I use the stated 40% control turnout as the baseline probability and define effect size as an **absolute percentage-point difference** in turnout. For example, an effect size of .05 means a change from 40% to 45%. I examine 5-, 10-, and 15-percentage-point effects because the prompt does not specify one effect size. The total sample size ranges up to 2,000.
+
+The power function below uses a two-sided, large-sample two-proportion z test. This makes the allocation comparison transparent; the curves are approximate, especially at small sample sizes. I use alpha .05, except that the two treatment-versus-control comparisons in Question 2 use Bonferroni-adjusted alpha .025 each to keep the family-wise error rate at no more than .05. The 80% line is a conventional planning benchmark, not a requirement stated in the prompt.
+
+```{python}
+def normal_cdf(value):
+    return NormalDist().cdf(value)
+
+
+def two_proportion_power(p1, p2, n1, n2, alpha=0.05):
+    """Approximate two-sided power for an unpooled alternative, pooled null SE."""
+    if n1 < 2 or n2 < 2:
+        return 0.0
+
+    p_null = (n1 * p1 + n2 * p2) / (n1 + n2)
+    se_null = math.sqrt(p_null * (1 - p_null) * (1 / n1 + 1 / n2))
+    se_alt = math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2)
+    difference = abs(p1 - p2)
+    z_critical = NormalDist().inv_cdf(1 - alpha / 2)
+
+    lower_tail = normal_cdf((-z_critical * se_null - difference) / se_alt)
+    upper_tail = 1 - normal_cdf((z_critical * se_null - difference) / se_alt)
+    return lower_tail + upper_tail
+
+
+def allocate_three_arms(n, shares):
+    """Integer allocation that sums to n using the largest-remainder rule."""
+    raw = np.asarray(shares, dtype=float) * n
+    counts = np.floor(raw).astype(int)
+    remainder = n - counts.sum()
+    order = np.argsort(-(raw - counts))
+    counts[order[:remainder]] += 1
+    return tuple(int(value) for value in counts)
+
+
+baseline_turnout = 0.40
+effect_sizes = [0.05, 0.10, 0.15]
+sample_sizes = range(60, 2001, 20)
+```
+
+### 1. Is either supplemental communication effective?
+
+For this question, the two supplemental-message arms are pooled and compared with control. Assuming the Canvas announcement and flyer have the same effect, the power-maximizing allocation is half control and half supplemental communication; the supplemental half can be split evenly between the two message types. This exposes about half the sample to an additional message while maximizing precision for the pooled contrast.
+
+```{python}
+any_effect_curve = []
+for n in sample_sizes:
+    n_control = n // 2
+    n_supplemental = n - n_control
+    for effect in effect_sizes:
+        any_effect_curve.append({
+            "N": n,
+            "effect": effect,
+            "power": two_proportion_power(
+                baseline_turnout + effect,
+                baseline_turnout,
+                n_supplemental,
+                n_control,
+                alpha=0.05,
+            ),
+        })
+
+fig, ax = plt.subplots(figsize=(8, 5))
+for effect in effect_sizes:
+    rows = [row for row in any_effect_curve if row["effect"] == effect]
+    ax.plot([row["N"] for row in rows], [row["power"] for row in rows],
+            label=f"{effect:.0%} increase")
+ax.axhline(0.80, color="black", linestyle="--", linewidth=1, label="80% power")
+ax.set(title="Power: either supplemental message vs. control",
+       xlabel="Total participants", ylabel="Power", ylim=(0, 1))
+ax.legend(title="Absolute effect")
+plt.show()
+```
+
+### 2. Is each specific communication effective versus control?
+
+To evaluate both messages separately against a shared control, I use the variance-minimizing allocation for two equally important comparisons with a common control: about 41% control, 29% Canvas, and 29% flyers. With equal outcome variances, this gives the control group about √2 times as many participants as either individual treatment group. Each contrast uses alpha .025 under the Bonferroni adjustment. If only one message were the priority, a two-arm 50/50 comparison of that message with control would be more efficient, but it would not answer the question for the other message.
+
+```{python}
+specific_effect_curve = []
+for n in sample_sizes:
+    control_share = math.sqrt(2) / (2 + math.sqrt(2))
+    treatment_share = 1 / (2 + math.sqrt(2))
+    n_control, n_canvas, n_flyer = allocate_three_arms(
+        n, [control_share, treatment_share, treatment_share]
+    )
+    for effect in effect_sizes:
+        # The plotted value is the common power of either comparison under equal allocation.
+        power_canvas = two_proportion_power(
+            baseline_turnout + effect, baseline_turnout,
+            n_canvas, n_control, alpha=0.025
+        )
+        power_flyer = two_proportion_power(
+            baseline_turnout + effect, baseline_turnout,
+            n_flyer, n_control, alpha=0.025
+        )
+        specific_effect_curve.append({
+            "N": n,
+            "effect": effect,
+            "power": min(power_canvas, power_flyer),
+        })
+
+fig, ax = plt.subplots(figsize=(8, 5))
+for effect in effect_sizes:
+    rows = [row for row in specific_effect_curve if row["effect"] == effect]
+    ax.plot([row["N"] for row in rows], [row["power"] for row in rows],
+            label=f"{effect:.0%} increase")
+ax.axhline(0.80, color="black", linestyle="--", linewidth=1, label="80% power")
+ax.set(title="Power: each message vs. shared control",
+       xlabel="Total participants", ylabel="Power", ylim=(0, 1))
+ax.legend(title="Absolute effect")
+plt.show()
+```
+
+### 3. Is the Canvas announcement more effective than flyers?
+
+The direct comparison is between the two message arms, so a control group is not needed for this specific estimand. The power-maximizing allocation is 50% Canvas and 50% flyer. For this contrast, I define the effect size as the difference between the two turnout rates and center the two rates around 40% (for example, 42.5% versus 37.5% for a 5-point difference). A control arm could be retained for a separate comparison, but each person assigned to control would reduce power for the message-versus-message question at a fixed total sample size.
+
+```{python}
+message_comparison_curve = []
+for n in sample_sizes:
+    n_canvas = n // 2
+    n_flyer = n - n_canvas
+    for effect in effect_sizes:
+        p_canvas = baseline_turnout + effect / 2
+        p_flyer = baseline_turnout - effect / 2
+        message_comparison_curve.append({
+            "N": n,
+            "effect": effect,
+            "power": two_proportion_power(
+                p_canvas, p_flyer, n_canvas, n_flyer, alpha=0.05
+            ),
+        })
+
+fig, ax = plt.subplots(figsize=(8, 5))
+for effect in effect_sizes:
+    rows = [row for row in message_comparison_curve if row["effect"] == effect]
+    ax.plot([row["N"] for row in rows], [row["power"] for row in rows],
+            label=f"{effect:.0%} difference")
+ax.axhline(0.80, color="black", linestyle="--", linewidth=1, label="80% power")
+ax.set(title="Power: Canvas announcement vs. flyers",
+       xlabel="Total participants", ylabel="Power", ylim=(0, 1))
+ax.legend(title="Absolute difference")
+plt.show()
+```
+
+### Power-analysis summary
+
+The curves show the trade-off between sample size, allocation, and the size of the effect that can be detected. At a fixed total sample size, balanced allocation gives the strongest precision for a two-group contrast; with two treatments sharing a control, the control group should be larger because it contributes to both comparisons. Thus, the pooled “any message” contrast uses half the sample in control and half offered a message; testing both messages separately uses about 41% control and 29% in each message arm; and a direct comparison of the two messages uses half in each message arm. The direct comparison does not require a control group. These are power-oriented allocations for the specified contrasts. If minimizing exposure is the primary goal, choose a target power and effect size first, then use the curves to find the smallest sample that reaches that target; with no minimum target specified, there is no unique minimum-exposure allocation.
+
+```{python}
+def first_n_at_power(curve, target=0.80):
+    eligible = [row["N"] for row in curve if row["power"] >= target]
+    return min(eligible) if eligible else None
+
+
+summary_rows = []
+for label, curve in [
+    ("Either message vs. control", any_effect_curve),
+    ("Each message vs. shared control", specific_effect_curve),
+    ("Canvas vs. flyers", message_comparison_curve),
+]:
+    for effect in effect_sizes:
+        effect_curve = [row for row in curve if row["effect"] == effect]
+        summary_rows.append({
+            "comparison": label,
+            "effect_size": effect,
+            "first_plotted_N_for_80_percent_power": first_n_at_power(effect_curve),
+        })
+
+summary_table = pl.DataFrame(summary_rows)
+```
+
+```{python}
+#| echo: false
+from IPython.display import display
+
+# A regular LaTeX tabular keeps all nine summary rows on one page.
+latex_rows = []
+for row in summary_rows:
+    n = row["first_plotted_N_for_80_percent_power"]
+    n_label = str(n) if n is not None else "Not reached"
+    latex_rows.append(
+        f'{row["comparison"]} & {row["effect_size"]:.2f} & {n_label}' + r" \\"
+    )
+latex_summary = (
+    r"\begin{center}\small\begin{tabular}{lrr}\toprule" + "\n"
+    + r"Comparison & Effect size & First plotted $N$ (80\% power) \\ \midrule" + "\n"
+    + "\n".join(latex_rows) + "\n"
+    + r"\bottomrule\end{tabular}\end{center}"
+)
+display({"text/html": summary_table._repr_html_(),
+         "text/latex": latex_summary}, raw=True)
+```
+
+With a maximum outreach of 2,000, modest effects may not reach 80% power, particularly when both messages must each be compared with a shared control. A failure to reach 80% is not evidence that a message has no effect; it means this planning setup may have limited sensitivity for that effect size. The analysis also assumes individual random assignment, no interference between students, accurate attendance recording, and the same underlying 40% turnout in each arm absent treatment.

@@ -1,0 +1,4 @@
+project:
+  type: default
+  render:
+    - problem_set_2_completed.qmd
